@@ -4,6 +4,10 @@ AdvWGAN is designed to generate adversarial example by using a modified Wasserst
 
 # Use
 
+## Pretrained Classifiers and Models
+
+All files are available [here](https://drive.google.com/drive/folders/1U7eGEJhWQ3MIy9Mpg19NgwdBqyiuPC3k?usp=sharing)
+
 ## Classifier
 
 You first need a classifier, here we use the following class to define one.
