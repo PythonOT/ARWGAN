@@ -1,0 +1,723 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 15 15:40:03 2019
+
+@author: vicari
+"""
+
+# Imports
+#%%
+import matplotlib.pyplot as plt
+import numpy as np 
+
+from ipywidgets import FloatProgress
+from IPython.display import display
+
+import random
+import tensorflow as tf
+import tensorflow.contrib as tc
+from tensorflow.keras.models import model_from_json
+from tensorflow.keras import backend as K
+from keras.backend.tensorflow_backend import set_session
+
+import math
+import scipy.misc
+from sklearn.utils import shuffle
+
+from AdvGAN import layers, utils, print_functions, dataset, models
+
+import configparser
+
+# Test block, will be removed
+#%%
+print('AdvGAN library')
+
+# Classes
+#%%     
+        
+
+###########################
+#
+# Class AdvGAN 
+#
+###########################  
+class AdvWGAN:
+    
+    def set_name(self, name):
+        self.name = name
+        
+    def set_generator(self, gen):
+        self.generator = gen
+        
+    def set_discriminator(self, disc):
+        self.discriminator = disc
+        
+    def set_batch_size(self, bs=None, mini_batch_max=None):       
+        if bs is None:
+            bs = self.batch_size 
+        if (mini_batch_max is not None) and (mini_batch_max < bs):
+            self.batch_size = bs
+            self.accumulate_grd = True
+            self.batch_size = mini_batch_max
+            self.n_minibatches = int(bs / mini_batch_max)      
+        else:
+            self.batch_size = bs
+            self.accumulate_grd = False
+            self.n_minibatches = 1
+            
+    def set_z_dim(self, z_dim):
+        if not isinstance(z_dim, (list, tuple, np.ndarray)):
+            z_dim = [z_dim]
+        self.z_dim = z_dim
+        
+    def set_loss(self, loss):
+        possible_losses = ['gp', 'lp', 'clip', 'sn', 'ct']
+        if loss['name'].lower() in possible_losses:
+            self.loss = loss['name'].lower()
+            
+            if loss['name'].lower() in ['gp', 'lp', 'ct']:
+                self.gp_lambda = float(loss['gp_lambda'])
+                
+            if loss['name'].lower() in ['ct']:
+                self.ct_lambda = float(loss['ct_lambda'])
+                
+            if loss['name'].lower() in ['clip']:
+                self.clip_value = float(loss['clip_value'])
+        else:
+            raise Exception('the loss {} is not valid'.format(loss))
+            
+    def set_optimizer_D(self, optimizer_D):
+        if optimizer_D['name'].lower() == 'adam':
+            
+            if optimizer_D['learning_rate'] is None:
+                optimizer_D['learning_rate'] = 1e-4
+                
+            if optimizer_D['beta1'] is None :
+                optimizer_D['beta1'] = 0.9
+                
+            if optimizer_D['beta2'] is None :
+                optimizer_D['beta2'] = 0.99
+                
+            self.optimizer_D = tf.train.AdamOptimizer(learning_rate=float(optimizer_D['learning_rate']), beta1=float(optimizer_D['beta1']), beta2=float(optimizer_D['beta2']))
+            
+        elif optimizer_D['name'].lower() == 'rmsprop':
+            
+            if optimizer_D['learning_rate'] is None:
+                optimizer_D['learning_rate'] = 1e-4
+                
+            self.optimizer_D = tf.train.RMSPropOptimizer(learning_rate=float(optimizer_D['learning_rate']))
+            
+        else:
+            raise Exception('the optimizer {} is not valid'.format(optimizer_D['name']))
+            
+    
+    def set_optimizer_G(self, optimizer_G):
+        if optimizer_G['name'].lower() == 'adam':
+            
+            if optimizer_G['learning_rate'] is None:
+                optimizer_G['learning_rate'] = 1e-4
+                
+            if optimizer_G['beta1'] is None :
+                optimizer_G['beta1'] = 0.9
+                
+            if optimizer_G['beta2'] is None :
+                optimizer_G['beta2'] = 0.99
+                
+            self.optimizer_G = tf.train.AdamOptimizer(learning_rate=float(optimizer_G['learning_rate']), beta1=float(optimizer_G['beta1']), beta2=float(optimizer_G['beta2']))
+            
+        elif optimizer_G['name'].lower() == 'rmsprop':
+            
+            if optimizer_G['learning_rate'] is None:
+                optimizer_G['learning_rate'] = 1e-4
+                
+            self.optimizer_G = tf.train.RMSPropOptimizer(learning_rate=float(optimizer_G['learning_rate']))
+            
+        else:
+            raise Exception('the optimizer {} is not valid'.format(optimizer_G['name']))
+            
+    def set_dataset(self, data):
+        
+        if not isinstance(data, (AdvGAN.dataset.Dataset)):
+            raise Exception('the dataset must be a Dataset object')
+        else:
+            self.data = data
+            
+    def set_training_options(self, nb_iter=None, init_step=None, n_c_iters_start=None, n_c_iters=None):
+        
+        if init_step is not None:
+            self.init_step = init_step
+            
+        if n_c_iters_start is not None:
+            self.n_c_iters_start = n_c_iters_start
+            
+        if n_c_iters is not None:
+            self.n_c_iters = n_c_iters
+            
+        if nb_iter is not None:
+            self.nb_iter = nb_iter   
+        
+    def set_classifier(self, classifier=None, nb_class=None, classifier_reshape=None, classifier_norm=None):
+        
+        if classifier is not None:
+            self.classifier = classifier
+        
+        if nb_class is not None:
+            self.nb_class = nb_class 
+            
+        if classifier_reshape is not None:
+            self.classifier_reshape = classifier_reshape
+            
+        if classifier_norm is not None:
+            self.classifier_norm = classifier_norm
+        
+    def set_logs(self, print_method=None, frequency_print=None, frequency_logs=None, logs_path=None):
+        
+        if print_method is not None:
+            self.print_method = print_method 
+            
+        if frequency_print is not None:
+            self.frequency_print = frequency_print 
+        
+        if frequency_logs is not None:
+            self.frequency_logs = frequency_logs
+            
+        if logs_path is not None:
+            self.logs_path = logs_path 
+        
+    def set_temperature(self, temperature):
+        self.temperature = temperature
+        
+    def set_adv(self, adv=True):
+        self.adv = adv
+    
+    def set_uses(self, use_proba=None, use_ceil=None, ceil_value=None, use_labels=None,
+                 use_softmax=None,  use_adaptative_adv=None, adaptative_term=None):
+               
+        if use_proba is not None:
+            self.use_proba = use_proba
+        if use_ceil is not None:
+            self.use_ceil = use_ceil 
+        if ceil_value is not None:
+            self.ceil_value = ceil_value
+        if use_labels is not None:
+            self.use_labels = use_labels
+        if use_softmax is not None:
+            self.use_softmax = use_softmax
+        if use_adaptative_adv is not None:
+            self.use_adaptative_adv = use_adaptative_adv
+        if adaptative_term is not None:
+            self.adaptative_term = adaptative_term
+
+        
+    def __init__(self):                      
+        
+        self.generator_a2b = AdvGAN.models.make_g_conv(
+                                    img_size=32,
+                                    hiddens_dims=[256,128,64],
+                                    nb_channels=1,
+                                    scope_name="generator_a2b",
+                                    use_sn=False,
+                                    use_bn=True,
+                                    h=tf.nn.relu,
+                                    o=tf.nn.tanh,
+                                    use_wn=False,
+                                    use_in=False
+                                    )
+        
+        self.generator_b2a = AdvGAN.models.make_cycle_g_b_conv(
+                                    hiddens_dims=[128,128,128],
+                                    h=tf.nn.relu,
+                                    scope_name="generator_b2a",
+                                    o=tf.nn.tanh,shape
+                                    )
+        
+        self.discriminator_a = AdvGAN.models.make_fc(
+                                hiddens_dims=[128,128,128],
+                                ouput_dims=1,
+                                scope_name="discriminator_a",
+                                h=AdvGAN.activations.lrelu(0.2),
+                                use_sn = False,
+                                use_bias = False,
+                                default_reuse = True
+                                )   
+        
+        self.discriminator_b = AdvGAN.models.make_d_conv(
+                                hiddens_dims=[64,128,256],
+                                scope_name="discriminator_b",
+                                h=AdvGAN.activations.lrelu(0.2),
+                                use_sn=False
+                                )
+ 
+        self.accumulate_grd = False
+        self.n_minibatches = 1
+        self.batch_size = 64   
+        self.name = "AdvGAN"
+        
+        self.use_adaptative_adv = False
+
+        self.z_dim = [16]      
+        self.gp_lambda = 10  
+        self.ct_lambda = 2
+        
+        self.optimizer_D = tf.train.RMSPropOptimizer(learning_rate=1e-4)
+        self.optimizer_G = tf.train.RMSPropOptimizer(learning_rate=1e-4)
+        
+        
+        self.init_step = 0
+        self.n_c_iters_start = 0
+        self.n_c_iters = 5
+        self.nb_iter = 5000
+        
+        
+        self.data = None
+        self.classifier = None
+        
+        self.classifier_reshape = None
+        self.classifier_norm = None
+        
+        self.nb_classes = 10
+        
+        self.print_method = AdvGAN.print_functions.show_it_label('advGAN')
+        self.frequency_print = 100     
+        self.frequency_logs = None
+        self.logs_path = './logs/'
+        
+        self.loss = 'lp'
+        
+        self.temperature = 20
+        self.clip_value = 0.1
+        
+        self.adv = False      
+        self.use_proba = True
+        self.use_ceil = False    
+        self.use_labels = False
+        
+        
+        self.g_loss = None
+        self.d_loss  = None
+        
+        self.builded = False
+        
+    def noise(self, batchsize, z_size):
+        """
+        Function to generate gaussian noise
+
+        Parameters
+        ----------
+        batchsize: int
+        z_size: int
+        
+        Returns
+        -------
+        np.array
+            array of noise with the shape [batchsize, z_size]
+        """
+        '''
+        size = [batchsize] + z_size
+        return np.random.normal(-1., 1., size=size)
+        '''
+        size = [batchsize] + z_size
+        rand = np.ones(len(size), dtype=np.int)
+        rand[-1] = size[-1]
+        rand[0] = size[0]
+        ones = np.ones(size, dtype=np.float)
+        return ones*np.random.normal(-1., 1., size=rand)
+    
+                
+    def build_model(self, reset_graph=False):
+        """
+        Function to build the graph use for AdvGAN
+        """
+    
+        if self.data is None:
+            raise Exception('a dataset must be specified')
+            
+        if (self.adv and (self.classifier is None)):
+            raise Exception('A classifier must be specified to train in adversarial mode')
+            
+        if(reset_graph):
+            tf.reset_default_graph()
+            
+        shape_a, shape_b = self.data.shape()
+       
+        self.X_a = tf.placeholder("float", shape_a, name="X_a")
+        self.X_b = tf.placeholder("float", shape_b, name="X_b")
+        self.is_training = tf.placeholder(tf.bool, shape=())
+
+
+        self.pred_real_b = self.discriminator_b(self.X_b, reuse=False)           
+        self.pred_real_a = self.discriminator_b(self.X_a, reuse=False)          
+        
+        #train with fake
+        self.X_fake_b = self.generator_a2b(self.X_a, train=self.is_training)      
+        self.X_fake_a = self.generator_b2a(self.X_b, train=self.is_training)
+
+        
+        self.pred_fake_b = self.discriminator_b(self.X_fake_b)
+        self.pred_fake_a = self.discriminator_b(self.X_fake_a)        
+           
+            
+        self.g_loss_a2b = - tf.reduce_mean(self.pred_fake_b)
+        self.g_loss_b2a = - tf.reduce_mean(self.pred_fake_a)
+     
+        
+        self.d_loss_b = - (tf.reduce_mean(self.pred_real_b) - tf.reduce_mean(self.pred_fake_b))
+        self.d_loss_a = - (tf.reduce_mean(self.pred_real_a) - tf.reduce_mean(self.pred_fake_a))
+        
+        self.neg_loss_b = - self.d_loss_b
+        self.neg_loss_a = - self.d_loss_a
+        
+        
+        if self.loss == 'gp' :
+            self.d_loss_a += self.gp_lambda * AdvGAN.losses.gp_loss(self.X_a, self.X_fake_a, self.discriminator_a, shape_a, labels=None)
+            self.d_loss_b += self.gp_lambda * AdvGAN.losses.gp_loss(self.X_b, self.X_fake_b, self.discriminator_b, shape_b, labels=None)
+        
+        if self.loss == 'lp' :
+            self.d_loss_a += self.gp_lambda * AdvGAN.losses.lp_loss(self.X_a, self.X_fake_a, self.discriminator_a, shape_a, labels=None)
+            self.d_loss_b += self.gp_lambda * AdvGAN.losses.lp_loss(self.X_b, self.X_fake_b, self.discriminator_b, shape_b, labels=None)
+            
+        if self.loss ==  'ct':
+            self.d_loss_a += self.gp_lambda * AdvGAN.losses.lp_loss(self.X_a, self.X_fake_a, self.discriminator_a, shape_a, labels=None)
+            self.d_loss_b += self.gp_lambda * AdvGAN.losses.lp_loss(self.X_b, self.X_fake_b, self.discriminator_b, shape_b, labels=None)
+            
+            self.d_loss_a += self.ct_lambda * AdvGAN.losses.ct_loss(self.X_a, self.X_fake_a, self.discriminator_a, shape_a, labels=None)
+            self.d_loss_b += self.ct_lambda * AdvGAN.losses.ct_loss(self.X_b, self.X_fake_b, self.discriminator_b, shape_b, labels=None)
+                
+        D_vars_a = [var for var in tf.trainable_variables() if "discriminator_a" in var.name]
+        G_vars_b2a = [var for var in tf.trainable_variables() if "generator_b2a" in var.name]  
+        D_vars_b = [var for var in tf.trainable_variables() if "discriminator_b" in var.name]
+        G_vars_a2b = [var for var in tf.trainable_variables() if "generator_a2b" in var.name]  
+
+
+        with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
+
+            self.G_b2a_step = (self.optimizer_G).minimize(self.g_loss_b2a, var_list=G_vars_b2a)
+            self.D_a_step = (self.optimizer_D).minimize(self.d_loss_a, var_list=D_vars_a)
+            
+            self.G_a2b_step = (self.optimizer_G).minimize(self.g_loss_a2b, var_list=G_vars_a2b)
+            self.D_b_step = (self.optimizer_D).minimize(self.d_loss_b, var_list=D_vars_b)
+        
+        self.saver = tf.train.Saver()
+        self.builded = True
+            
+    def train(self, init_step=None, n_c_iters_start=None, n_c_iters=None, nb_iter=None, print_method=None, 
+              frequency_print = None, frequency_logs=None, use_ceil=None, restore=False):
+        """
+        Function to train AdvGAN
+
+        Parameters
+        ----------
+        init_step: int
+            number of step for the initialisation phase
+        n_c_iters_start: int
+            number of discriminator update in the initialisation phase
+        n_c_iters: int
+            ratio of discriminator update per generator update
+        nb_iter: int
+            number of generation for the training
+        print_method: function
+            function call every X generation
+        frequency_print: int
+            the number of generation beetwen each print_method d
+        frequency_logs: int
+            the number of generation beetwen each log update
+        use_ceil: boolean
+                ceil the probabilty depending of the amount of adversarial data in the batch
+        """
+        if not self.builded :
+            raise Exception('Build the model first')
+        
+        if init_step is not None:
+            self.init_step = init_step
+        if n_c_iters_start is not None:
+            self.n_c_iters_start = n_c_iters_start
+        if n_c_iters is not None:
+            self.n_c_iters = n_c_iters
+        if nb_iter is not None:
+            self.nb_iter = nb_iter
+        if print_method is not None:
+            self.print_method = print_method
+        if frequency_print is not None:
+            self.frequency_print = frequency_print
+        if frequency_logs is not None:
+            self.frequency_logs = frequency_logs
+        if use_ceil is not None:
+            self.use_ceil = use_ceil  
+            
+        self.f_prog = FloatProgress(min=0, max=self.nb_iter)
+        display(self.f_prog)   
+        
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth=True
+        with tf.Session(config=config) as sess:
+            set_session(sess)
+            sess.run(tf.global_variables_initializer())
+            if(restore):
+                self.saver.restore(sess, "data/"+self.name+'.ckpt')
+                print("Model load")
+            #GAN_vars = [var for var in tf.global_variables() if "GAN" in var.name]
+            #sess.run(tf.variables_initializer(GAN_vars))
+            if(self.adv):
+                self.predict = self.classifier()
+                self.data.adv_poba(self.predict, reshape=self.classifier_reshape, norm=self.classifier_norm)
+       
+            self.critic_losses = []
+            self.neg_losses = []
+            self.generator_losses = []
+            d_sum, g_sum = None, None
+            self.writer = tf.summary.FileWriter(self.logs_path, graph=tf.get_default_graph())
+            
+            ##################################################
+            # Train phase
+            #####
+            if self.n_c_iters_start != None:
+                n_c_iters = self.n_c_iters_start
+            
+            for self.it in range(0,self.nb_iter+1):
+                if self.it > self.init_step :
+                    n_c_iters = self.n_c_iters
+                    
+                #loss_critic = [] # To be sure there is convergence
+                
+                ####################################################################################################################
+                # Train the discriminator
+                #####           
+                for _ in range(n_c_iters):
+                    dal = []
+                    dbl = []
+                    nl_a = []
+                    nl_b = []
+
+                    # On recupere le batch suivant
+                    X_a, X_b = self.data.next_batch(self.batch_size)
+
+                    # Classic GAN
+                    fd = {self.X_a: X_a, self.X_b: X_b,
+                                   self.is_training : True}
+                    
+                    _, _, d_loss_a, neg_loss_a, d_loss_b, neg_loss_b = sess.run(
+                                [self.D_a_step, self.D_b_step, self.d_loss_a, self.neg_loss_a, self.d_loss_b, self.neg_loss_b],
+                                feed_dict=fd) 
+ 
+                ####################################################################################################################
+                # Train the generator
+                ##### 
+                gal = []
+                gbl = []
+                
+                X_a, X_b = self.data.next_batch(self.batch_size)
+                
+                fd = {self.X_a: X_a, self.X_b: X_b,
+                                   self.is_training : True}
+                    
+                _, _, g_loss_b2a, g_loss_a2b = sess.run(
+                    [self.G_b2a_step, self.G_b2a_step, self.g_loss_b2a, self.g_loss_a2b],
+                    feed_dict=fd) 
+                        
+                ####################################################################################################################
+                # Logs
+                #####
+                    
+                self.neg_losses_a.append(neg_loss_a)
+                self.critic_losses_a.append(d_loss_a)
+
+                self.generator_losses_a.append(g_loss_b2a)
+                
+                self.neg_losses_b.append(neg_loss_b)
+                self.critic_losses_b.append(d_loss_b)
+
+                self.generator_losses_b.append(g_loss_a2b)
+                self.f_prog.value += 1
+
+                ####################################################################################################################
+                # print_method and save
+                #####
+                if self.it % self.frequency_print == 0:
+                    if self.print_method != None:
+                        X_a, X_b = self.data.next_batch(self.batch_size)
+                        samples = []
+                        samples.append(self.X_fake_a.eval(feed_dict={self.X_b: X_b, self.is_training : False}))
+                        samples.append(self.X_fake_b.eval(feed_dict={self.X_a: X_a, self.is_training : False}))
+
+                        self.print_method(samples=samples, gan=self)
+                    # To save the model 
+                    self.saver.save(sess, "data/"+self.name+".ckpt")
+                                        
+   
+    #############################################
+    #############################################
+                 
+    def generate(self, batch_size=None):
+        """
+        Function to generate a batch of data
+    
+        Parameters
+        ----------
+        batch_size: int
+            number of data generated, use the set value by default, optional
+        
+        Returns
+        -------
+        array
+            batch of generated data
+        """
+        nb = self.batch_size
+        if(batch_size != None):
+            nb = batch_size
+        with tf.Session() as sess:
+            self.saver.restore(sess, "data/"+self.name+".ckpt")
+            return self.X_fake.eval(feed_dict={self.z:self.noise(nb, self.z_dim), self.is_training : False})
+        
+    #############################################
+    
+    def discriminate(self, img):
+        with tf.Session() as sess:
+            self.saver.restore(sess, "data/"+self.name+".ckpt")
+            return self.pred_fake.eval(feed_dict={self.X_fake: img}) 
+    
+    #############################################
+    
+    def generate_with_noise(self, noise):
+        """
+        Function to generate a batch of data
+    
+        Parameters
+        ----------
+        noise: array of shape [batch, z_dim]
+            The noise for the generator
+        
+        Returns
+        -------
+        array
+            batch of generated data
+        """
+        with tf.Session() as sess:
+            self.saver.restore(sess, "data/"+self.name+".ckpt")
+            return self.X_fake.eval(feed_dict={self.z: noise, self.is_training : False})
+    
+    #############################################
+    
+    def load_and_generate(self, path, noise=None, batch_size=None, data=None):
+        """
+        Function to generate a batch of data
+    
+        Parameters
+        ----------
+        path: string
+                path to file ckpt from ./data, without the extension
+                
+        noise: array of shape [batch, z_dim]
+            The noise for the generator, optional
+        
+        Returns
+        -------
+        array
+            batch of generated data
+        """
+        nb = self.batch_size
+        with tf.Session() as sess:
+            self.saver.restore(sess, "data/"+path+".ckpt")
+            if batch_size != None:
+                nb = batch_size
+            if noise is None:
+                noise = self.noise(nb, self.z_dim)
+            if(self.use_labels):
+                if data is None:
+                    if self.dataset_is_tf:
+                        return sess.run([self.X_fake, self.X_real , self.labels], feed_dict={self.z:self.noise(self.batch_size, self.z_dim), self.is_training : False})
+                    else:
+                        X_mb, sample_labels, c_proba = self.data.next_batch(nb)
+                        return self.X_fake.eval(feed_dict={self.X_real: X_mb, self.labels: sample_labels, self.z: noise, self.is_training : False}), X_mb, sample_labels
+                else:
+                    return self.X_fake.eval(feed_dict={self.X_real: data[0], self.labels: data[1], self.z: noise, self.is_training : False})
+                
+            else:
+                if data is None:
+                    return self.X_fake.eval(feed_dict={self.z: noise, self.is_training : False})
+                else:
+                    return self.X_fake.eval(feed_dict={self.X_real: data, self.z: noise, self.is_training : False})
+    
+    #############################################
+       
+    def load_and_discrimininate(self, path, data):
+        with tf.Session() as sess:
+            self.saver.restore(sess, "data/"+path+".ckpt")
+            return self.pred_fake.eval(feed_dict={self.X_fake: data})
+    
+    #############################################
+    
+    def save_loss(self, path='./loss'):
+        """
+        Function to save the critic loss
+        """
+        np.save(path, self.critic_losses)
+ 
+##########################################################################################
+##########################################################################################
+##########################################################################################
+        
+def make_gan(file):
+    config = configparser.ConfigParser()
+    config.read(file)
+    
+    AdvGan = AdvWGAN()
+    
+    # MISC
+    misc = config['MISC']
+    
+    AdvGan.set_name(misc.get('name'))
+    AdvGan.set_adv(misc.getboolean('adv'))   
+    AdvGan.set_z_dim(eval(misc.get('z_dim')))
+    AdvGan.set_batch_size(misc.getint('batch_size'))
+    AdvGan.set_batch_size(misc.getint('mini_batch_max'))
+    AdvGan.set_temperature(misc.getfloat('temperature'))
+    
+    # USES
+    uses = config['USES']
+    AdvGan.set_uses(uses.getboolean('use_proba'), uses.getboolean('use_ceil'), uses.getint('ceil_value'), uses.getboolean('use_labels'), uses.getboolean('use_softmax')) 
+        
+    # REGULARIZATION
+    reg = dict(config['REGULARIZATION'])
+    
+    if len(reg.keys()) > 0:
+        AdvGan.set_loss(reg)
+    
+    # OPTIMIZERS
+    opti_D = dict(config['D_OPTIMIZER'])
+    
+    if len(opti_D.keys()) > 0:
+        AdvGan.set_optimizer_D(opti_D)
+        
+    opti_G = dict(config['G_OPTIMIZER'])
+    
+    if len(opti_G.keys()) > 0:
+        AdvGan.set_optimizer_G(opti_G)
+    
+    # TRAIN
+    train = config['TRAIN']
+    
+    nb_iter = train.getint('nb_iter')
+    init_step = train.getint('init_step')
+    n_c_iters_start = train.getint('n_c_iters_start')
+    n_c_iter = train.getint('n_c_iter')
+        
+    AdvGan.set_training_options(nb_iter, init_step, n_c_iters_start, n_c_iter)
+    
+    # LOGS
+    
+    log = config['LOGS']
+        
+    print_method = log.get('print_method')
+    
+    if print_method == 'show_it_label':
+        print_method = AdvGAN.print_functions.show_it_label(log.get('label', 'label'))
+        
+        
+    frequency_print = log.getint('frequency_print')
+    frequency_logs = log.getint('frequency_logs')
+    logs_path = log.get('logs_path')  
+        
+    AdvGan.set_logs(print_method, frequency_print, frequency_logs, logs_path)
+        
+    return AdvGan
